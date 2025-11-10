@@ -1,6 +1,11 @@
+# app.py (replace existing file)
 import os
 import json
-from flask import Flask, request, jsonify, send_from_directory, session, redirect, url_for
+from pathlib import Path
+from flask import (
+    Flask, request, jsonify, send_from_directory, session, redirect, url_for
+)
+from werkzeug.utils import secure_filename
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FRONTEND_DIR = os.path.join(BASE_DIR, "../Frontend")
@@ -9,19 +14,24 @@ PROJECTS_FILE = os.path.join(BASE_DIR, "projects.json")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = Flask(
-    __name__,
-    static_folder=FRONTEND_DIR,
-    static_url_path=""
-)
+app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path="")
 
-app.secret_key = "emxelux_secret_key_2025"
+# Config: read secrets from environment
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "emxelux")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "change-this-in-prod")
 
-# --- Admin Credentials ---
-ADMIN_USERNAME = "emxelux"
-ADMIN_PASSWORD = "emmtech12"
+# Upload limits + allowed extensions
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB
+ALLOWED_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+ALLOWED_ZIP_EXTS = {".zip"}
 
-# --- Helper Functions ---
+def allowed_file(filename, allowed_exts):
+    if not filename:
+        return False
+    ext = Path(filename).suffix.lower()
+    return ext in allowed_exts
+
 def load_projects():
     if not os.path.exists(PROJECTS_FILE):
         return []
@@ -29,86 +39,86 @@ def load_projects():
         try:
             return json.load(f)
         except json.JSONDecodeError:
+            # corrupted file: treat as empty or recreate
             return []
 
 def save_projects(projects):
-    with open(PROJECTS_FILE, "w", encoding="utf-8") as f:
+    tmp = PROJECTS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(projects, f, indent=2)
+    os.replace(tmp, PROJECTS_FILE)
 
-# --- Static Pages ---
-@app.route("/")
-def home():
-    return send_from_directory(FRONTEND_DIR, "index.html")
-
-@app.route("/projects.html")
-def projects_page():
-    return send_from_directory(FRONTEND_DIR, "projects.html")
-
-@app.route("/admin_upload.html")
-def admin_upload():
-    if not session.get("logged_in"):
-        return redirect(url_for("home"))
-    return send_from_directory(FRONTEND_DIR, "admin_upload.html")
-
-# --- Authentication Routes ---
+# Simple admin login route (for demo only)
 @app.route("/login", methods=["POST"])
 def login():
-    data = request.get_json()
+    data = request.json or {}
     username = data.get("username")
     password = data.get("password")
     if username == ADMIN_USERNAME and password == ADMIN_PASSWORD:
         session["logged_in"] = True
-        return jsonify({"message": "Login successful!"})
-    return jsonify({"error": "Invalid credentials"}), 401
+        return jsonify({"message": "Logged in"})
+    return jsonify({"error": "Unauthorized"}), 401
 
-@app.route("/logout")
+@app.route("/logout", methods=["POST"])
 def logout():
-    session.pop("logged_in", None)
-    return jsonify({"message": "Logged out successfully"})
+    session.clear()
+    return jsonify({"message": "Logged out"})
 
-@app.route("/check_login")
-def check_login():
-    return jsonify({"logged_in": session.get("logged_in", False)})
-
-# --- Project Management ---
-@app.route("/get_projects")
-def get_projects():
-    return jsonify(load_projects())
-
-@app.route("/upload_project", methods=["POST"])
-def upload_project():
+# Example: add project with file upload
+@app.route("/add_project", methods=["POST"])
+def add_project():
     if not session.get("logged_in"):
         return jsonify({"error": "Unauthorized"}), 401
-    try:
-        name = request.form.get("name")
-        report = request.form.get("report")
-        zip_file = request.files.get("zip")
-        image_file = request.files.get("image")
 
-        if not all([name, report, zip_file, image_file]):
-            return "Missing required fields", 400
+    # Use form fields and files (adjust depending on frontend)
+    title = request.form.get("title", "")
+    description = request.form.get("description", "")
+    image = request.files.get("image")
+    zip_file = request.files.get("zip")
 
-        zip_path = os.path.join(UPLOAD_DIR, zip_file.filename)
-        image_path = os.path.join(UPLOAD_DIR, image_file.filename)
-        zip_file.save(zip_path)
-        image_file.save(image_path)
+    saved_image_name = None
+    saved_zip_name = None
 
-        projects = load_projects()
-        projects.append({
-            "name": name,
-            "report": report,
-            "zip": zip_file.filename,
-            "image": image_file.filename
-        })
-        save_projects(projects)
-        return "Project uploaded successfully!", 200
-    except Exception as e:
-        print("UPLOAD ERROR:", e)
-        return f"Error uploading project: {e}", 500
+    # handle image
+    if image and allowed_file(image.filename, ALLOWED_IMAGE_EXTS):
+        filename = secure_filename(image.filename)
+        saved_image_name = f"{int(os.times()[4])}_{filename}"
+        image.save(os.path.join(UPLOAD_DIR, saved_image_name))
+    elif image:
+        return jsonify({"error": "Invalid image file type"}), 400
 
-@app.route("/uploads/<path:filename>")
+    # handle zip
+    if zip_file and allowed_file(zip_file.filename, ALLOWED_ZIP_EXTS):
+        filename = secure_filename(zip_file.filename)
+        saved_zip_name = f"{int(os.times()[4])}_{filename}"
+        zip_file.save(os.path.join(UPLOAD_DIR, saved_zip_name))
+    elif zip_file:
+        return jsonify({"error": "Invalid zip file type"}), 400
+
+    projects = load_projects()
+    project = {
+        "title": title,
+        "description": description,
+        "image": saved_image_name,
+        "zip": saved_zip_name
+    }
+    projects.append(project)
+    save_projects(projects)
+    return jsonify({"message": "Project added", "project": project})
+
+@app.route("/projects", methods=["GET"])
+def list_projects():
+    projects = load_projects()
+    return jsonify(projects)
+
+@app.route("/download/<filename>", methods=["GET"])
 def download_file(filename):
-    return send_from_directory(UPLOAD_DIR, filename, as_attachment=True)
+    # sanitize the filename and ensure it exists in uploads
+    safe = secure_filename(filename)
+    path = os.path.join(UPLOAD_DIR, safe)
+    if not os.path.exists(path):
+        return jsonify({"error": "File not found"}), 404
+    return send_from_directory(UPLOAD_DIR, safe, as_attachment=True)
 
 @app.route("/delete_project/<int:project_id>", methods=["DELETE"])
 def delete_project(project_id):
@@ -119,12 +129,17 @@ def delete_project(project_id):
         return jsonify({'error': 'Invalid project ID'}), 404
     project = projects.pop(project_id)
 
-    for file in [project.get("image"), project.get("zip")]:
-        path = os.path.join(UPLOAD_DIR, file)
-        if os.path.exists(path):
-            os.remove(path)
+    for filename in filter(None, [project.get("image"), project.get("zip")]):
+        safe = secure_filename(filename)
+        full = os.path.join(UPLOAD_DIR, safe)
+        try:
+            if os.path.exists(full):
+                os.remove(full)
+        except Exception as e:
+            app.logger.exception("Error deleting file %s: %s", full, e)
     save_projects(projects)
     return jsonify({'message': 'Project deleted successfully!'})
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    debug_env = os.environ.get("FLASK_ENV") == "development"
+    app.run(host="0.0.0.0", debug=debug_env)
